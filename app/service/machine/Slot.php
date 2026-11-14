@@ -863,7 +863,38 @@ class Slot extends MachineServices implements BaseMachine
         $expirationTime = 1000000;
 
         if ($attempts == 0) {
-            MachineLogger::sendCommand($this->machine->toArray(), MachineLogger::ACTION_WASH, '下分開始', $this->getMachineCache());
+            $washCache    = $this->getMachineCache();
+            $washOddsRatio = bcdiv(
+                (string) ($this->machine->odds_x ?? 1),
+                (string) max(1, (int) ($this->machine->odds_y ?? 1)),
+                8
+            );
+            MachineLogger::log(
+                $this->machine->toArray(),
+                MachineLogger::SOURCE_PLAYER,
+                MachineLogger::STATUS_NORMAL,
+                MachineLogger::DIR_EVENT,
+                MachineLogger::ACTION_WASH,
+                '洗分前機台快照',
+                [
+                    'gaming_pressure'      => max(0, $this->bet - $this->player_pressure),
+                    'chip_amount_snapshot' => bcmul(
+                        (string) max(0, (int) bcsub((string) $this->bet, (string) $this->player_pressure)),
+                        $washOddsRatio,
+                        2
+                    ),
+                    'gaming_score'         => max(0, $this->win - $this->player_score),
+                    'player_open_point'    => $this->player_open_point,
+                    'player_wash_point'    => $this->player_wash_point,
+                    'bet'                  => $this->bet,
+                    'player_pressure'      => $this->player_pressure,
+                    'win'                  => $this->win,
+                    'player_score'         => $this->player_score,
+                    'player_id'            => $this->gaming_user_id,
+                    'machine_data'         => $washCache,
+                ]
+            );
+            MachineLogger::sendCommand($this->machine->toArray(), MachineLogger::ACTION_WASH, '下分開始', $washCache);
         }
 
         try {
