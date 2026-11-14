@@ -697,8 +697,41 @@ class Slot extends MachineServices implements BaseMachine
     ): void
     {
         try {
-            $beforePoint = $this->point;
-            MachineLogger::sendCommand($this->machine->toArray(), MachineLogger::ACTION_OPEN, '開分開始 前分數=' . $beforePoint, $this->getMachineCache());
+            $beforePoint  = $this->point;
+            $openCache    = $this->getMachineCache();
+            $openOddsRatio = bcdiv(
+                (string) ($this->machine->odds_x ?? 1),
+                (string) max(1, (int) ($this->machine->odds_y ?? 1)),
+                8
+            );
+            MachineLogger::log(
+                $this->machine->toArray(),
+                MachineLogger::SOURCE_PLAYER,
+                MachineLogger::STATUS_NORMAL,
+                MachineLogger::DIR_EVENT,
+                MachineLogger::ACTION_OPEN,
+                '上分前機台快照',
+                [
+                    'is_first_open'        => (int) ($this->gaming_user_id == 0),
+                    'open_score'           => $data,
+                    'gaming_pressure'      => max(0, $this->bet - $this->player_pressure),
+                    'chip_amount_snapshot' => bcmul(
+                        (string) max(0, (int) bcsub((string) $this->bet, (string) $this->player_pressure)),
+                        $openOddsRatio,
+                        2
+                    ),
+                    'gaming_score'         => max(0, $this->win - $this->player_score),
+                    'player_open_point'    => $this->player_open_point,
+                    'player_wash_point'    => $this->player_wash_point,
+                    'bet'                  => $this->bet,
+                    'player_pressure'      => $this->player_pressure,
+                    'win'                  => $this->win,
+                    'player_score'         => $this->player_score,
+                    'player_id'            => $this->gaming_user_id,
+                    'machine_data'         => $openCache,
+                ]
+            );
+            MachineLogger::sendCommand($this->machine->toArray(), MachineLogger::ACTION_OPEN, '開分開始 前分數=' . $beforePoint, $openCache);
             Gateway::sendToUid($uid, hex2bin($this->createCmd(self::PREFIX . $cmd, $data, self::TYPE_OPEN_CARD)));
             $beforeActionTime = $this->action_time;
             $handleDuration = 0;
