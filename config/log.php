@@ -778,6 +778,26 @@ $handlers = [
         ],
     ],
 
+    // ✅ 玩家钱包操作日志通道
+    // 输出标准 JSON Lines，供 Vector 采集后写入 ClickHouse
+    // 覆盖：扣款、加款、洗分等所有余额变更操作
+    'wallet_ops' => [
+        'handlers' => [
+            [
+                'class' => Monolog\Handler\RotatingFileHandler::class,
+                'constructor' => [
+                    runtime_path() . '/logs/wallet_ops.log',
+                    7, // 保留7天
+                    Monolog\Logger::DEBUG,
+                ],
+                'formatter' => [
+                    'class' => app\support\FlatJsonFormatter::class,
+                    'constructor' => [],
+                ],
+            ]
+        ],
+    ],
+
     // ✅ 机台工控统一日志通道
     // 输出标准 JSON Lines，供 Vector 采集后写入 ClickHouse
     // 覆盖：玩家操作、心跳、管理员操作、系统事件、错误告警
