@@ -603,14 +603,14 @@ LUA;
      */
     public static function markAsSynced(string $redisKey, int $recordId): void
     {
-        self::redis()->hMSet($redisKey, [
+        // 使用同一连接对象执行 hMSet + zRem，避免两步用不同连接导致部分成功
+        $redis = self::redis();
+        $redis->hMSet($redisKey, [
             'status' => 'synced',
             'record_id' => $recordId,
             'synced_at' => date('Y-m-d H:i:s'),
         ]);
-
-        // 从同步队列移除
-        Redis::zRem(self::PREFIX_SYNC_QUEUE, $redisKey);
+        $redis->zRem(self::PREFIX_SYNC_QUEUE, $redisKey);
     }
 
     /**
