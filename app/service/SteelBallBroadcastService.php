@@ -53,20 +53,26 @@ class SteelBallBroadcastService
                 return false;
             }
 
-            // 3. 获取该渠道的钢珠报喜配置
-            $threshold = self::getThreshold($machine->department_id);
+            // 3. 检查 department_id 有效性（机台可能未绑定渠道）
+            if (empty($machine->department_id)) {
+                Log::warning('钢珠报喜跳过：机台未绑定渠道', ['machine_id' => $machine->id]);
+                return false;
+            }
+
+            // 4. 获取该渠道的钢珠报喜配置
+            $threshold = self::getThreshold((int)$machine->department_id);
 
             if ($threshold === null || $threshold <= 0) {
                 return false; // 未配置或禁用
             }
 
-            // 4. 检查是否达到阈值
+            // 5. 检查是否达到阈值
             if ($ballCount < $threshold) {
                 return false;
             }
 
-            // 5. 防抖检查（防止同一玩家短时间内重复广播）
-            if (!self::checkDebounce($machine->gaming_user_id, $machine->department_id)) {
+            // 6. 防抖检查（防止同一玩家短时间内重复广播）
+            if (!self::checkDebounce($machine->gaming_user_id, (int)$machine->department_id)) {
                 Log::info('钢珠报喜防抖跳过', [
                     'player_id' => $machine->gaming_user_id,
                     'department_id' => $machine->department_id,
@@ -75,7 +81,7 @@ class SteelBallBroadcastService
                 return false;
             }
 
-            // 6. 加载关联数据
+            // 7. 加载关联数据
             $player = Player::with(['storeAdmin', 'vipLevel'])->find($machine->gaming_user_id);
             $channel = Channel::where('department_id', $machine->department_id)->first();
 
@@ -94,10 +100,10 @@ class SteelBallBroadcastService
                 $machine->load('machineLabel');
             }
 
-            // 7. 构建广播消息
+            // 8. 构建广播消息
             $messageData = self::buildMessage($player, $channel, $machine, $ballCount);
 
-            // 8. 执行广播
+            // 9. 执行广播
             self::broadcast($channel->department_id, $player->store_admin_id ?? 0, $messageData['message'], $messageData['lang']);
 
             Log::info('钢珠报喜成功', [
