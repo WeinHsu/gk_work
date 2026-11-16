@@ -456,8 +456,8 @@ class LotteryServices
                                 ->update([
                                     'amount'     => \support\Db::raw(
                                         $useRefill
-                                            ? "GREATEST(amount + {$accumulated}, {$autoRefill})"
-                                            : "amount + {$accumulated}"
+                                            ? "GREATEST(amount + " . sprintf('%.4f', (float)$accumulated) . ", " . sprintf('%.4f', (float)$autoRefill) . ")"
+                                            : "amount + " . sprintf('%.4f', (float)$accumulated)
                                     ),
                                     'updated_at' => date('Y-m-d H:i:s'),
                                 ]);
@@ -486,8 +486,8 @@ class LotteryServices
                             ->update([
                                 'amount'     => \support\Db::raw(
                                     $fallbackUseRefill
-                                        ? "GREATEST(amount + {$fallbackAccumulated}, {$fallbackAutoRefill})"
-                                        : "amount + {$fallbackAccumulated}"
+                                        ? "GREATEST(amount + " . sprintf('%.4f', (float)$fallbackAccumulated) . ", " . sprintf('%.4f', (float)$fallbackAutoRefill) . ")"
+                                        : "amount + " . sprintf('%.4f', (float)$fallbackAccumulated)
                                 ),
                                 'updated_at' => date('Y-m-d H:i:s'),
                             ]);
@@ -683,6 +683,10 @@ class LotteryServices
             return floatval($betAmount);
         }
 
+        \support\Log::warning('calculateBetAmount: 未支持的机台类型，打码量计为0', [
+            'machine_id'   => $this->machine->id,
+            'machine_type' => $this->machine->type,
+        ]);
         return 0;
     }
 
@@ -769,7 +773,7 @@ LUA;
                 $redisKey,         // KEYS[1]
                 $betAmount,        // ARGV[1]
                 $requiredAmount,   // ARGV[2]
-                86400          // ARGV[3] - 7天过期
+                604800         // ARGV[3] - 7天过期
             );
 
             // 解析 JSON 结果
@@ -1042,8 +1046,43 @@ LUA;
 
             $lottery->save();
 
-            // ✅ 提交数据库事务（此时所有数据库操作成功）
-            DB::commit();
+            // ✅ Redis 加款在 DB commit 之前执行：
+            // - 若 Redis 失败：DB 事务直接回滚，玩家余额/彩池均不变
+            // - 若 DB commit 失败：补偿扣回 Redis，确保最终一致
+            try {
+                $incrementResult = WalletService::atomicIncrement($this->player->id, $amount);
+                $newBalance = $incrementResult['balance'];
+                // 在事务内更新实际余额，与 commit 原子绑定
+                $playerDeliveryRecord->amount_after = $newBalance;
+                $playerDeliveryRecord->save();
+            } catch (\Exception $e) {
+                DB::rollBack();
+                \support\Log::warning('随机彩金：Redis 加款失败，DB 事务已回滚，玩家余额不变', [
+                    'lottery_id'   => $lottery->id,
+                    'player_id'    => $this->player->id,
+                    'prize_amount' => $amount,
+                    'error'        => $e->getMessage(),
+                ]);
+                return false;
+            }
+
+            // 提交数据库事务；若提交失败则补偿扣回 Redis
+            try {
+                DB::commit();
+            } catch (\Exception $commitException) {
+                try {
+                    WalletService::atomicDecrement($this->player->id, $amount, 0, '中奖DB提交失败补偿扣款');
+                } catch (\Exception $compensateEx) {
+                    \support\Log::critical('严重：随机彩金DB提交失败且Redis补偿扣款也失败，需人工处理', [
+                        'lottery_id'       => $lottery->id,
+                        'player_id'        => $this->player->id,
+                        'amount'           => $amount,
+                        'commit_error'     => $commitException->getMessage(),
+                        'compensate_error' => $compensateEx->getMessage(),
+                    ]);
+                }
+                throw $commitException;
+            }
 
             \support\Log::channel('lottery_machine')->info('[彩池中獎-後]', [
                 'lottery_id'      => $lottery->id,
@@ -1058,51 +1097,6 @@ LUA;
                 'pool_db_after'   => (float)$lottery->amount,
                 'auto_refill'     => $lottery->auto_refill_status == 1 ? (float)$lottery->auto_refill_amount : 0,
             ]);
-
-            // ✅ 事务提交后，更新 Redis 余额（两阶段提交）
-            // 优势：数据库操作失败时 Redis 不会被修改，保证数据一致性
-            // 风险：Redis 操作失败时数据库已提交，需要补偿机制
-            try {
-                $incrementResult = WalletService::atomicIncrement($this->player->id, $amount);
-                $newBalance = $incrementResult['balance'];
-
-                // 更新交易记录的实际余额（异步更新，不影响主流程）
-                try {
-                    $playerDeliveryRecord->amount_after = $newBalance;
-                    $playerDeliveryRecord->save();
-                } catch (\Exception $e) {
-                    // 余额记录更新失败不影响主流程
-                    \support\Log::warning('更新交易记录实际余额失败', [
-                        'delivery_id' => $playerDeliveryRecord->id,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
-            } catch (\Exception $e) {
-                // 加款失敗：原子 SQL 回滾彩池，然後中止後續通知和 Redis 清除
-                try {
-                    \support\Db::table($lottery->getTable())
-                        ->where('id', $lottery->id)
-                        ->update([
-                            'amount'        => \support\Db::raw("amount + {$baseDeductAmount}"),
-                            'lottery_times' => \support\Db::raw('lottery_times - 1'),
-                            'updated_at'    => date('Y-m-d H:i:s'),
-                        ]);
-                } catch (\Exception $rollbackException) {
-                    \support\Log::critical('彩池回滚失败', [
-                        'lottery_id' => $lottery->id,
-                        'error' => $rollbackException->getMessage(),
-                    ]);
-                }
-
-                // 加款失敗：停止後續冷卻、socket 通知、Redis 清除（保留累積的押注）
-                \support\Log::warning('随机彩金：錢包加款失敗，彩池已回滾，中止後續通知', [
-                    'lottery_id'   => $lottery->id,
-                    'player_id'    => $this->player->id,
-                    'prize_amount' => $amount,
-                    'error'        => $e->getMessage(),
-                ]);
-                return false;
-            }
 
             // 设置冷却期：中奖后30分钟内不再触发中奖
             $this->setCooldown($lottery->id);
@@ -1749,8 +1743,44 @@ LUA;
 
                     $lotteryModel->save();
 
-                    // ✅ 提交数据库事务（此时所有数据库操作成功）
-                    DB::commit();
+                    // ✅ Redis 加款在 DB commit 之前执行：
+                    // - 若 Redis 失败：DB 事务直接回滚，玩家余额/彩池均不变
+                    // - 若 DB commit 失败：补偿扣回 Redis，确保最终一致
+                    try {
+                        $incrementResult = WalletService::atomicIncrement($this->player->id, $fixedAllowLottery['amount']);
+                        $afterAmount = $incrementResult['balance'];
+                        // 在事务内更新实际余额，与 commit 原子绑定
+                        $playerDeliveryRecord->amount_after = $afterAmount;
+                        $playerDeliveryRecord->save();
+                    } catch (\Exception $e) {
+                        DB::rollBack();
+                        \support\Log::warning('固定彩金：Redis 加款失败，DB 事务已回滚，玩家余额不变', [
+                            'lottery_id'   => $fixedAllowLottery['lottery_id'],
+                            'player_id'    => $this->player->id,
+                            'prize_amount' => $fixedAllowLottery['amount'],
+                            'error'        => $e->getMessage(),
+                        ]);
+                        $playerLotteryRecord = null;
+                        return null;
+                    }
+
+                    // 提交数据库事务；若提交失败则补偿扣回 Redis
+                    try {
+                        DB::commit();
+                    } catch (\Exception $commitException) {
+                        try {
+                            WalletService::atomicDecrement($this->player->id, $fixedAllowLottery['amount'], 0, '固定彩金DB提交失败补偿扣款');
+                        } catch (\Exception $compensateEx) {
+                            \support\Log::critical('严重：固定彩金DB提交失败且Redis补偿扣款也失败，需人工处理', [
+                                'lottery_id'       => $fixedAllowLottery['lottery_id'],
+                                'player_id'        => $this->player->id,
+                                'amount'           => $fixedAllowLottery['amount'],
+                                'commit_error'     => $commitException->getMessage(),
+                                'compensate_error' => $compensateEx->getMessage(),
+                            ]);
+                        }
+                        throw $commitException;
+                    }
 
                     \support\Log::channel('lottery_machine')->info('[彩池中獎-後]', [
                         'lottery_id'     => $lotteryModel->id,
@@ -1765,56 +1795,6 @@ LUA;
                         'pool_db_after'  => (float)$lotteryModel->amount,
                         'auto_refill'    => $lotteryModel->auto_refill_status == 1 ? (float)$lotteryModel->auto_refill_amount : 0,
                     ]);
-
-                    // ✅ 事务提交后，更新 Redis 余额（两阶段提交）
-                    // 优势：数据库操作失败时 Redis 不会被修改，保证数据一致性
-                    // 风险：Redis 操作失败时数据库已提交，需要补偿机制
-                    try {
-                        $result = \app\service\WalletService::add($this->player->id, $fixedAllowLottery['amount']);
-                        if ($result['success']) {
-                            $afterAmount = $result['balance'];
-
-                            // 更新交易记录的实际余额（异步更新，不影响主流程）
-                            try {
-                                $playerDeliveryRecord->amount_after = $afterAmount;
-                                $playerDeliveryRecord->save();
-                            } catch (\Exception $e) {
-                                // 余额记录更新失败不影响主流程
-                                \support\Log::warning('更新固定彩金交易记录实际余额失败', [
-                                    'delivery_id' => $playerDeliveryRecord->id,
-                                    'error' => $e->getMessage(),
-                                ]);
-                            }
-                        } else {
-                            throw new \Exception($result['error'] ?? 'Redis 加款失败');
-                        }
-                    } catch (\Exception $e) {
-                        // 尝试回滚彩池扣减（尽力而为，可能失败）
-                        try {
-                            \support\Db::table($lotteryModel->getTable())
-                                ->where('id', $lotteryModel->id)
-                                ->update([
-                                    'amount'        => \support\Db::raw("amount + {$baseDeductAmount}"),
-                                    'lottery_times' => \support\Db::raw('lottery_times - 1'),
-                                    'updated_at'    => date('Y-m-d H:i:s'),
-                                ]);
-                        } catch (\Exception $rollbackException) {
-                            \support\Log::critical('固定彩金彩池回滚失败', [
-                                'lottery_id' => $fixedAllowLottery['lottery_id'],
-                                'error' => $rollbackException->getMessage(),
-                            ]);
-                        }
-
-                        // 加款失敗：停止後續 socket 通知，不清除 Redis pending key（保留累積的押注）
-                        \support\Log::warning('固定彩金：錢包加款失敗，彩池已回滾，中止後續通知', [
-                            'lottery_id'   => $fixedAllowLottery['lottery_id'],
-                            'player_id'    => $this->player->id,
-                            'prize_amount' => $fixedAllowLottery['amount'],
-                            'error'        => $e->getMessage(),
-                        ]);
-                        $playerLotteryRecord = null;
-                        return null;
-                    }
 
                     // 清除彩金缓存（事务提交后）
                     self::clearLotteryListCache($this->machine->type);

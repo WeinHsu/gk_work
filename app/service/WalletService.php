@@ -630,9 +630,13 @@ LUA;
 
             // Redis 冷启动保护：key 不存在时先从 DB 加载真实余额再执行 Lua，
             // 防止 Redis 重启/key 被驱逐后 Lua 把余额当 0 处理。
+            // 使用 Lua NX 原子写入，防止并发请求覆盖彼此已写入的正确值。
             if (!Redis::exists($cacheKey)) {
                 $dbBalance = self::getBalanceFromDB($playerId, self::DEFAULT_PLATFORM_ID);
-                Redis::set($cacheKey, (int)round($dbBalance * 100));
+                Redis::eval(
+                    "if redis.call('EXISTS', KEYS[1]) == 0 then redis.call('SET', KEYS[1], ARGV[1]) end return 1",
+                    1, $cacheKey, (int)round($dbBalance * 100)
+                );
             }
 
             // ✅ 整数化：将"元"转换为"分"
@@ -746,9 +750,13 @@ LUA;
 
             // Redis 冷启动保护：key 不存在时先从 DB 加载真实余额再执行 Lua，
             // 防止 Redis 重启/key 被驱逐后 Lua 把余额当 0 处理导致扣款拒绝。
+            // 使用 Lua NX 原子写入，防止并发请求覆盖彼此已写入的正确值。
             if (!Redis::exists($cacheKey)) {
                 $dbBalance = self::getBalanceFromDB($playerId, self::DEFAULT_PLATFORM_ID);
-                Redis::set($cacheKey, (int)round($dbBalance * 100));
+                Redis::eval(
+                    "if redis.call('EXISTS', KEYS[1]) == 0 then redis.call('SET', KEYS[1], ARGV[1]) end return 1",
+                    1, $cacheKey, (int)round($dbBalance * 100)
+                );
             }
 
             // ✅ 整数化：将"元"转换为"分"
@@ -880,13 +888,22 @@ LUA;
             // ✅ 整数化：将"元"转换为"分"
             $minWashAmountInCents = $minWashAmount * 100;
 
+            // 冷启动保护：key 不存在时从 DB 加载余额，使用 Lua NX 原子写入
+            if (!Redis::exists($cacheKey)) {
+                $dbBalance = self::getBalanceFromDB($playerId, self::DEFAULT_PLATFORM_ID);
+                Redis::eval(
+                    "if redis.call('EXISTS', KEYS[1]) == 0 then redis.call('SET', KEYS[1], ARGV[1]) end return 1",
+                    1, $cacheKey, (int)round($dbBalance * 100)
+                );
+            }
+
             // 执行 Lua 脚本，原子性完成洗分操作
+            // $ttl 不传：余额 key 永不过期（系统设计要求）
             $resultJson = Redis::eval(
                 self::LUA_ATOMIC_WASH,
                 1,  // KEYS 数量
                 $cacheKey,              // KEYS[1]
-                $minWashAmountInCents,  // ARGV[1] - 最小洗分金额（分）
-                $ttl                    // ARGV[2]
+                $minWashAmountInCents   // ARGV[1] - 最小洗分金额（分）
             );
 
             $result = json_decode($resultJson, true);
