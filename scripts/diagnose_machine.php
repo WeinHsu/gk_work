@@ -31,6 +31,9 @@ const GREEN  = "\033[0;32m";
 const CYAN   = "\033[0;36m";
 const NC     = "\033[0m";
 
+// ───────────────── 忽略的常规 action（时间线中不显示）─────────────────
+const SKIP_ACTIONS = ['heartbeat'];
+
 // ───────────────── 时间段过滤 ─────────────────
 $startTs = null;
 $endTs   = null;
@@ -167,13 +170,16 @@ if (!is_file($ctrlFile)) {
             echo "  $raw\n";
             continue;
         }
-        $dt = $d['datetime'] ?? '';
+        $dt     = $d['datetime'] ?? '';
+        $action = $d['action']   ?? '';
         if (!inTimeRange($dt)) {
+            continue;
+        }
+        if (in_array($action, SKIP_ACTIONS, true)) {
             continue;
         }
         $count++;
         $status = $d['log_status'] ?? 'info';
-        $action = $d['action']      ?? '';
         $desc   = trunc($d['action_desc'] ?? '');
         $prefix = statusPrefix($status);
         printf("  %s %s  %-28s %s\n", $prefix, $dt, $action, $desc);
