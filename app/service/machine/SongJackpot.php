@@ -450,42 +450,67 @@ class SongJackpot extends MachineServices implements BaseMachine
                 // 开奖结束
                 if ($nowRewardStatus == 0) {
                     if ($orgRewardStatus == 1) {
-                        if (!empty($this->machine->gamingPlayer)) {
-                            (new LotteryServices())->setMachine($this->machine)->setPlayer($this->machine->gamingPlayer)->fixedPotCheckLottery($nowScore);
-                        }
-                        if ($nowScore > 0 && !empty($gamingUserId)) {
-                            Client::send('play-activity', [
-                                'machine_id' => $this->machine->id,
-                                'player_id' => $gamingUserId,
-                                'point' => $nowScore,
-                            ]);
-                            // 钢珠报喜：检测珠数是否达到阈值并广播
-                            \app\service\SteelBallBroadcastService::checkAndBroadcast($this->machine, $nowScore);
+                        // 彩金检查、积分通知等非核心操作隔离在独立 try-catch 中，
+                        // 任何失败都不能阻止后续的下珠指令。
+                        try {
+                            if (!empty($this->machine->gamingPlayer)) {
+                                (new LotteryServices())->setMachine($this->machine)->setPlayer($this->machine->gamingPlayer)->fixedPotCheckLottery($nowScore);
+                            }
+                            if ($nowScore > 0 && !empty($gamingUserId)) {
+                                Client::send('play-activity', [
+                                    'machine_id' => $this->machine->id,
+                                    'player_id' => $gamingUserId,
+                                    'point' => $nowScore,
+                                ]);
+                                // 钢珠报喜：检测珠数是否达到阈值并广播
+                                \app\service\SteelBallBroadcastService::checkAndBroadcast($this->machine, $nowScore);
 
-                            // 钢珠下珠赠送积分（由 gk_admin 消费者根据门店开关决定是否发放）
-                            Client::send('steel-ball-points-gift', [
-                                'player_id'      => $gamingUserId,
-                                'machine_id'     => $this->machine->id,
-                                'department_id'  => $this->machine->department_id,
-                                'store_admin_id' => $this->machine->gamingPlayer?->store_admin_id ?? 0,
-                                'score'          => $nowScore,
+                                // 钢珠下珠赠送积分（由 gk_admin 消费者根据门店开关决定是否发放）
+                                Client::send('steel-ball-points-gift', [
+                                    'player_id'      => $gamingUserId,
+                                    'machine_id'     => $this->machine->id,
+                                    'department_id'  => $this->machine->department_id,
+                                    'store_admin_id' => $this->machine->gamingPlayer?->store_admin_id ?? 0,
+                                    'score'          => $nowScore,
+                                ]);
+                            }
+                            // 记录开奖结果得分
+                            MachineLotteryRecord::query()
+                                ->where('id', $this->lottery_record_id)
+                                ->whereNull('lottery_win')
+                                ->first()
+                                ?->update(['lottery_win' => $nowScore]);
+                            $this->lottery_record_id = 0;
+                            // 开奖结束后需剔除其他观看中玩家
+                            sendSocketMessage('group-' . $this->machine->id, [
+                                'msg_type' => 'machine_reward_end',
+                                'machine_id' => $this->machine->id,
+                                'machine_code' => $this->machine->code,
+                                'gaming_user_id' => $gamingUserId,
                             ]);
+                        } catch (\Throwable $e) {
+                            MachineLogger::error(
+                                $this->machine->toArray(),
+                                'reward_post_process',
+                                '开奖后处理异常（下珠不受影响）: ' . $e->getMessage(),
+                                $this->getMachineCache(),
+                                MachineLogger::DIR_EVENT
+                            );
                         }
-                        // 记录开奖结果得分
-                        MachineLotteryRecord::query()
-                            ->where('id', $this->lottery_record_id)
-                            ->whereNull('lottery_win')
-                            ->first()
-                            ?->update(['lottery_win' => $nowScore]);
-                        $this->lottery_record_id = 0;
-                        // 开奖结束后需剔除其他观看中玩家
-                        sendSocketMessage('group-' . $this->machine->id, [
-                            'msg_type' => 'machine_reward_end',
-                            'machine_id' => $this->machine->id,
-                            'machine_code' => $this->machine->code,
-                            'gaming_user_id' => $gamingUserId,
-                        ]);
-                        $this->sendScoreToPointAsync($gamingUserId);
+
+                        // 下珠指令：独立执行，确保无论上方流程是否出错都能触发
+                        $safeGamingUserId = (int)($gamingUserId ?? 0);
+                        if ($safeGamingUserId > 0) {
+                            $this->sendScoreToPointAsync($safeGamingUserId);
+                        } else {
+                            MachineLogger::warning(
+                                $this->machine->toArray(),
+                                'score_to_point',
+                                '开奖结束时无在台玩家，跳过下珠指令',
+                                $this->getMachineCache(),
+                                MachineLogger::DIR_COMMAND
+                            );
+                        }
                     }
                 }
                 if ($orgWinNumber > 0 && $orgWinNumber > $nowWinNumber && $this->change_point_card_status == 0 && $nowRewardStatus == 0 && $orgRewardStatus == 0) {

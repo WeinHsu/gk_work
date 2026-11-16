@@ -1287,48 +1287,70 @@ class SongOfflineJackpot extends MachineServices implements BaseMachine
     private function handleLotteryEnd(int $nowRewardStatus, int $orgRewardStatus, $nowScore, int $gamingUserId): void
     {
         if ($nowRewardStatus == 0 && $orgRewardStatus == 1) {
-            // 触发彩池抽奖
-            if (!empty($this->machine->gamingPlayer)) {
-                (new LotteryServices())
-                    ->setMachine($this->machine)
-                    ->setPlayer($this->machine->gamingPlayer)
-                    ->fixedPotCheckLottery($nowScore);
-            }
+            // 彩金检查、积分通知等非核心操作隔离在独立 try-catch 中，
+            // 任何失败都不能阻止后续的下珠指令。
+            try {
+                // 触发彩池抽奖
+                if (!empty($this->machine->gamingPlayer)) {
+                    (new LotteryServices())
+                        ->setMachine($this->machine)
+                        ->setPlayer($this->machine->gamingPlayer)
+                        ->fixedPotCheckLottery($nowScore);
+                }
 
-            // 线下版钢珠机不参与机台活动，不发送 play-activity 队列
-            // 但保留钢珠报喜功能（广播功能，非活动）
-            if ($nowScore > 0) {
-                // 钢珠报喜：检测珠数是否达到阈值并广播
-                \app\service\SteelBallBroadcastService::checkAndBroadcast($this->machine, $nowScore);
+                // 线下版钢珠机不参与机台活动，不发送 play-activity 队列
+                // 但保留钢珠报喜功能（广播功能，非活动）
+                if ($nowScore > 0) {
+                    // 钢珠报喜：检测珠数是否达到阈值并广播
+                    \app\service\SteelBallBroadcastService::checkAndBroadcast($this->machine, $nowScore);
 
-                // 钢珠下珠赠送积分（由 gk_admin 消费者根据门店开关决定是否发放）
-                \Webman\RedisQueue\Client::send('steel-ball-points-gift', [
-                    'player_id'      => $gamingUserId,
-                    'machine_id'     => $this->machine->id,
-                    'department_id'  => $this->machine->department_id,
-                    'store_admin_id' => $this->machine->gamingPlayer?->store_admin_id ?? 0,
-                    'score'          => $nowScore,
+                    // 钢珠下珠赠送积分（由 gk_admin 消费者根据门店开关决定是否发放）
+                    \Webman\RedisQueue\Client::send('steel-ball-points-gift', [
+                        'player_id'      => $gamingUserId,
+                        'machine_id'     => $this->machine->id,
+                        'department_id'  => $this->machine->department_id,
+                        'store_admin_id' => $this->machine->gamingPlayer?->store_admin_id ?? 0,
+                        'score'          => $nowScore,
+                    ]);
+                }
+
+                // 记录开奖结果得分
+                MachineLotteryRecord::query()
+                    ->where('id', $this->lottery_record_id)
+                    ->whereNull('lottery_win')
+                    ->first()
+                    ?->update(['lottery_win' => $nowScore]);
+                $this->lottery_record_id = 0;
+
+                // 通知前端开奖结束
+                sendSocketMessage('group-' . $this->machine->id, [
+                    'msg_type' => 'machine_reward_end',
+                    'machine_id' => $this->machine->id,
+                    'machine_code' => $this->machine->code,
+                    'gaming_user_id' => $gamingUserId,
                 ]);
+            } catch (\Throwable $e) {
+                MachineLogger::error(
+                    $this->machine->toArray(),
+                    'reward_post_process',
+                    '开奖后处理异常（下珠不受影响）: ' . $e->getMessage(),
+                    $this->getMachineCache(),
+                    MachineLogger::DIR_EVENT
+                );
             }
 
-            // 记录开奖结果得分
-            MachineLotteryRecord::query()
-                ->where('id', $this->lottery_record_id)
-                ->whereNull('lottery_win')
-                ->first()
-                ?->update(['lottery_win' => $nowScore]);
-            $this->lottery_record_id = 0;
-
-            // 通知前端开奖结束
-            sendSocketMessage('group-' . $this->machine->id, [
-                'msg_type' => 'machine_reward_end',
-                'machine_id' => $this->machine->id,
-                'machine_code' => $this->machine->code,
-                'gaming_user_id' => $gamingUserId,
-            ]);
-
-            // 自动执行"得分→分数"转换
-            $this->sendScoreToPointAsync($gamingUserId);
+            // 下珠指令：独立执行，确保无论上方流程是否出错都能触发
+            if ($gamingUserId > 0) {
+                $this->sendScoreToPointAsync($gamingUserId);
+            } else {
+                MachineLogger::warning(
+                    $this->machine->toArray(),
+                    'score_to_point',
+                    '开奖结束时无在台玩家，跳过下珠指令',
+                    $this->getMachineCache(),
+                    MachineLogger::DIR_COMMAND
+                );
+            }
         }
     }
 
