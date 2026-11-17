@@ -71,7 +71,7 @@ return [
     // 性能优化（2026-04-09）：使用 EVALSHA 减少 70% 网络传输
     'GameRecordSyncWorker' => [
         'handler' => GameRecordSyncWorker::class,
-        'count' => 2,  // 2 个进程，应对高峰期
+        'count' => 1,  // 2 个进程，应对高峰期
     ],
     // ✅ 游戏记录清理进程（Redis 过期记录清理）
     'GameRecordCleanWorker' => [
