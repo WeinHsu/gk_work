@@ -53,38 +53,70 @@ class SteelBallBroadcastService
                 return false;
             }
 
-            // 3. 获取该渠道的钢珠报喜配置
-            $threshold = self::getThreshold($machine->department_id);
-
-            if ($threshold === null || $threshold <= 0) {
-                return false; // 未配置或禁用
-            }
-
-            // 4. 检查是否达到阈值
-            if ($ballCount < $threshold) {
+            // 3. 加载玩家并确定所属部门
+            //    ⚠️ machine 表没有 department_id 列，不能用 $machine->department_id（恒为 null）
+            //    部门取玩家所属部门（与 Jackpot 中 gamingPlayer->department_id 的取法一致）
+            /** @var Player $player */
+            $player = Player::with(['storeAdmin', 'vipLevel'])->find($machine->gaming_user_id);
+            if (!$player) {
+                Log::warning('钢珠报喜缺少必要数据', [
+                    'machine_id' => $machine->id,
+                    'player_id' => $machine->gaming_user_id,
+                    'has_player' => false,
+                    'has_channel' => null,
+                ]);
                 return false;
             }
 
-            // 5. 防抖检查（防止同一玩家短时间内重复广播）
-            if (!self::checkDebounce($machine->gaming_user_id, $machine->department_id)) {
+            $departmentId = (int)($player->department_id ?? 0);
+            if ($departmentId <= 0) {
+                Log::warning('钢珠报喜玩家无所属部门', [
+                    'machine_id' => $machine->id,
+                    'player_id' => $machine->gaming_user_id,
+                ]);
+                return false;
+            }
+
+            // 4. 获取该渠道的钢珠报喜配置
+            $threshold = self::getThreshold($departmentId);
+
+            if ($threshold === null || $threshold <= 0) {
+                Log::debug('钢珠报喜未触发：渠道未配置阈值或已禁用', [
+                    'department_id' => $departmentId,
+                    'ball_count' => $ballCount,
+                ]);
+                return false; // 未配置或禁用
+            }
+
+            // 5. 检查是否达到阈值
+            if ($ballCount < $threshold) {
+                Log::debug('钢珠报喜未触发：珠数未达阈值', [
+                    'department_id' => $departmentId,
+                    'ball_count' => $ballCount,
+                    'threshold' => $threshold,
+                ]);
+                return false;
+            }
+
+            // 6. 防抖检查（防止同一玩家短时间内重复广播）
+            if (!self::checkDebounce($machine->gaming_user_id, $departmentId)) {
                 Log::info('钢珠报喜防抖跳过', [
                     'player_id' => $machine->gaming_user_id,
-                    'department_id' => $machine->department_id,
+                    'department_id' => $departmentId,
                     'ball_count' => $ballCount,
                 ]);
                 return false;
             }
 
-            // 6. 加载关联数据
-            $player = Player::with(['storeAdmin', 'vipLevel'])->find($machine->gaming_user_id);
-            $channel = Channel::where('department_id', $machine->department_id)->first();
+            // 7. 加载渠道
+            $channel = Channel::where('department_id', $departmentId)->first();
 
-            if (!$player || !$channel) {
+            if (!$channel) {
                 Log::warning('钢珠报喜缺少必要数据', [
                     'machine_id' => $machine->id,
                     'player_id' => $machine->gaming_user_id,
-                    'has_player' => !is_null($player),
-                    'has_channel' => !is_null($channel),
+                    'has_player' => true,
+                    'has_channel' => false,
                 ]);
                 return false;
             }
@@ -94,10 +126,10 @@ class SteelBallBroadcastService
                 $machine->load('machineLabel');
             }
 
-            // 7. 构建广播消息
+            // 8. 构建广播消息
             $messageData = self::buildMessage($player, $channel, $machine, $ballCount);
 
-            // 8. 执行广播
+            // 9. 执行广播
             self::broadcast($channel->department_id, $messageData['message'], $messageData['lang']);
 
             Log::info('钢珠报喜成功', [
@@ -111,7 +143,7 @@ class SteelBallBroadcastService
                 'machine_label' => $machine->machineLabel?->name ?? '',
                 'ball_count' => $ballCount,
                 'threshold' => $threshold,
-                'department_id' => $machine->department_id,
+                'department_id' => $departmentId,
                 'message' => $messageData['message'],
             ]);
 
@@ -238,8 +270,14 @@ class SteelBallBroadcastService
             $vipLevel = $player->vipLevel->name;
         }
 
+        // 获取门店名称
+        $storeName = $player->storeAdmin?->nickname ?? ($player->storeAdmin?->username ?? '');
+
         // 获取机台名称
         $machineName = $machine->name ?? $machine->code;
+
+        // 获取机台编号
+        $machineCode = $machine->code;
 
         // 获取机台标签
         $machineLabel = $machine->machineLabel?->name ?? '';
@@ -267,14 +305,16 @@ class SteelBallBroadcastService
         // ✅ 优化2：使用多语言翻译（与高分广播保持一致）
         try {
             $message = trans('message', [
-                '{vip_text}' => $vipText,
-                '{device_name}' => $deviceName,
+                '{vip_text}'          => $vipText,
+                '{device_name}'       => $deviceName,
+                '{store_name}'        => $storeName,
+                '{machine_code}'      => $machineCode,
                 '{machine_full_name}' => $machineFullName,
-                '{ball_count}' => $formattedBallCount,
+                '{ball_count}'        => $formattedBallCount,
             ], 'steel_ball_broadcast', $lang);
         } catch (\Throwable $e) {
             // 降级：如果翻译失败，使用默认繁体中文
-            $message = "恭喜{$vipText}【{$deviceName}】遊戲《{$machineFullName}》高中{$formattedBallCount}珠";
+            $message = "恭喜{$vipText}【{$deviceName}】在{$storeName}【{$machineCode}】遊戲《{$machineFullName}》高中{$formattedBallCount}珠";
             Log::warning('钢珠报喜翻译失败，使用默认文案', [
                 'lang' => $lang,
                 'error' => $e->getMessage(),
