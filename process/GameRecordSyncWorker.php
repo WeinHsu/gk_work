@@ -47,7 +47,7 @@ class GameRecordSyncWorker
     /**
      * 每次同步数量
      */
-    private const BATCH_SIZE = 100;
+    private const BATCH_SIZE = 200;
 
     /**
      * 获取排除的平台代码列表
