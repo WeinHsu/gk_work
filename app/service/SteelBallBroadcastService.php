@@ -130,7 +130,7 @@ class SteelBallBroadcastService
             $messageData = self::buildMessage($player, $channel, $machine, $ballCount);
 
             // 9. 执行广播
-            self::broadcast($channel->department_id, $player->store_admin_id ?? 0, $messageData['message'], $messageData['lang']);
+            self::broadcast($channel->department_id, $messageData['message'], $messageData['lang']);
 
             Log::info('钢珠报喜成功', [
                 'player_id' => $machine->gaming_user_id,
@@ -270,8 +270,14 @@ class SteelBallBroadcastService
             $vipLevel = $player->vipLevel->name;
         }
 
+        // 获取门店名称
+        $storeName = $player->storeAdmin?->nickname ?? ($player->storeAdmin?->username ?? '');
+
         // 获取机台名称
         $machineName = $machine->name ?? $machine->code;
+
+        // 获取机台编号
+        $machineCode = $machine->code;
 
         // 获取机台标签
         $machineLabel = $machine->machineLabel?->name ?? '';
@@ -299,14 +305,16 @@ class SteelBallBroadcastService
         // ✅ 优化2：使用多语言翻译（与高分广播保持一致）
         try {
             $message = trans('message', [
-                '{vip_text}' => $vipText,
-                '{device_name}' => $deviceName,
+                '{vip_text}'          => $vipText,
+                '{device_name}'       => $deviceName,
+                '{store_name}'        => $storeName,
+                '{machine_code}'      => $machineCode,
                 '{machine_full_name}' => $machineFullName,
-                '{ball_count}' => $formattedBallCount,
+                '{ball_count}'        => $formattedBallCount,
             ], 'steel_ball_broadcast', $lang);
         } catch (\Throwable $e) {
             // 降级：如果翻译失败，使用默认繁体中文
-            $message = "恭喜{$vipText}【{$deviceName}】遊戲《{$machineFullName}》高中{$formattedBallCount}珠";
+            $message = "恭喜{$vipText}【{$deviceName}】在{$storeName}【{$machineCode}】遊戲《{$machineFullName}》高中{$formattedBallCount}珠";
             Log::warning('钢珠报喜翻译失败，使用默认文案', [
                 'lang' => $lang,
                 'error' => $e->getMessage(),
