@@ -130,7 +130,7 @@ class SteelBallBroadcastService
             $messageData = self::buildMessage($player, $channel, $machine, $ballCount);
 
             // 9. 执行广播
-            self::broadcast($channel->department_id, $messageData['message'], $messageData['lang']);
+            self::broadcast($departmentId, (int)($player->store_admin_id ?? 0), $messageData['message'], $messageData['lang']);
 
             Log::info('钢珠报喜成功', [
                 'player_id' => $machine->gaming_user_id,
