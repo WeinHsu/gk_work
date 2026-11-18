@@ -1448,18 +1448,52 @@ function machineWash(
             // 移到 commit() 之后：fixedPotCheckLottery 拥有独立事务，lockForUpdate 行锁在
             // 自身 commit 后立即释放，sync 读到已提交的扣款值，不会覆盖。
             if ($machine->type == GameType::TYPE_SLOT && $money > 0) {
+                MachineLogger::log(
+                    $machine->toArray(),
+                    MachineLogger::SOURCE_SYSTEM,
+                    MachineLogger::STATUS_NORMAL,
+                    MachineLogger::DIR_EVENT,
+                    'lottery_fixed',
+                    '开始固定彩金检查',
+                    [
+                        'player_id' => $player->id,
+                        'money'     => $money,
+                        'path'      => $path,
+                        'has_send'  => $path == 'leave',
+                    ]
+                );
                 try {
                     $playerLotteryRecord = (new LotteryServices())
                         ->setMachine($machine)
                         ->setPlayer($player)
                         ->fixedPotCheckLottery($money, false, $path == 'leave');
+                    MachineLogger::log(
+                        $machine->toArray(),
+                        MachineLogger::SOURCE_SYSTEM,
+                        MachineLogger::STATUS_NORMAL,
+                        MachineLogger::DIR_EVENT,
+                        'lottery_fixed',
+                        '固定彩金检查完成',
+                        [
+                            'player_id'  => $player->id,
+                            'has_record' => !is_null($playerLotteryRecord),
+                            'amount'     => $playerLotteryRecord->amount ?? null,
+                        ]
+                    );
                 } catch (\Exception $e) {
-                    \support\Log::error('[machineWash] 固定彩金检查失败（洗分已完成）', [
-                        'machine_id' => $machine->id,
-                        'player_id' => $player->id,
-                        'money' => $money,
-                        'error' => $e->getMessage(),
-                    ]);
+                    MachineLogger::log(
+                        $machine->toArray(),
+                        MachineLogger::SOURCE_SYSTEM,
+                        MachineLogger::STATUS_ERROR,
+                        MachineLogger::DIR_EVENT,
+                        'lottery_fixed',
+                        '固定彩金检查失败（洗分已完成）',
+                        [
+                            'player_id' => $player->id,
+                            'money'     => $money,
+                            'error'     => $e->getMessage(),
+                        ]
+                    );
                 }
             }
 
@@ -1481,15 +1515,22 @@ function machineWash(
                 // [打码量诊断] 清零前记录本局末尾状态
                 // gaming_pressure = bet - player_pressure（本局押分）
                 // gaming_score    = win - player_score（本局得分）
-                \support\Log::channel('bet_statistics')->info('[BetStats] 玩家洗分/离场，本局押分清零', [
-                    'player_id'       => $player->id,
-                    'machine_id'      => $machine->id,
-                    'gaming_pressure' => $gamingPressure ?? 0,  // 本局押分（分）= bet - player_pressure
-                    'gaming_score'    => $gamingScore    ?? 0,  // 本局得分（分）= win - player_score
-                    'bet_raw'         => (float)$services->bet,
-                    'player_pressure' => (float)$services->player_pressure,
-                    'path'            => $path ?? 'wash',
-                ]);
+                MachineLogger::log(
+                    $machine->toArray(),
+                    MachineLogger::SOURCE_SYSTEM,
+                    MachineLogger::STATUS_NORMAL,
+                    MachineLogger::DIR_EVENT,
+                    MachineLogger::ACTION_WASH,
+                    '玩家洗分/离场，本局押分清零',
+                    [
+                        'player_id'       => $player->id,
+                        'gaming_pressure' => $gamingPressure ?? 0,
+                        'gaming_score'    => $gamingScore    ?? 0,
+                        'bet_raw'         => (float)$services->bet,
+                        'player_pressure' => (float)$services->player_pressure,
+                        'path'            => $path ?? 'wash',
+                    ]
+                );
                 $services->player_pressure = 0;
                 $services->player_score = 0;
                 $services->bet = 0;
@@ -1505,12 +1546,20 @@ function machineWash(
             try {
                 $addResult = \app\service\WalletService::add($player->id, $washResult['game_amount']);
 
-                Log::info('[machineWash] 钱包加款成功', [
-                    'player_id' => $player->id,
-                    'amount' => $washResult['game_amount'],
-                    'before' => $washResult['before_balance'],
-                    'after' => $addResult['balance'],
-                ]);
+                MachineLogger::log(
+                    $machine->toArray(),
+                    MachineLogger::SOURCE_SYSTEM,
+                    MachineLogger::STATUS_NORMAL,
+                    MachineLogger::DIR_EVENT,
+                    MachineLogger::ACTION_WASH,
+                    '钱包加款成功',
+                    [
+                        'player_id' => $player->id,
+                        'amount'    => $washResult['game_amount'],
+                        'before'    => $washResult['before_balance'],
+                        'after'     => $addResult['balance'],
+                    ]
+                );
 
                 // ✅ 推送余额变化到客户端
                 \app\service\BalancePushService::pushBalanceChange(
@@ -1526,14 +1575,20 @@ function machineWash(
 
             } catch (Exception $walletError) {
                 // ❌ CRITICAL：钱包加款失败，但 DB + Redis 已一致
-                Log::critical('[machineWash] 钱包加款失败，需要人工介入', [
-                    'player_id' => $player->id,
-                    'amount' => $washResult['game_amount'],
-                    'before_balance' => $washResult['before_balance'],
-                    'error' => $walletError->getMessage(),
-                    'action' => '已洗分成功（DB+硬件+Redis），但钱包未加款，请立即手动给玩家加款',
-                    'timestamp' => date('Y-m-d H:i:s'),
-                ]);
+                MachineLogger::log(
+                    $machine->toArray(),
+                    MachineLogger::SOURCE_SYSTEM,
+                    MachineLogger::STATUS_ERROR,
+                    MachineLogger::DIR_EVENT,
+                    MachineLogger::ACTION_WASH,
+                    '钱包加款失败，需要人工介入（DB+硬件+Redis已一致，但钱包未加款）',
+                    [
+                        'player_id'      => $player->id,
+                        'amount'         => $washResult['game_amount'],
+                        'before_balance' => $washResult['before_balance'],
+                        'error'          => $walletError->getMessage(),
+                    ]
+                );
 
                 // 发送 Telegram CRITICAL 告警
                 try {
@@ -1553,9 +1608,15 @@ function machineWash(
                         ]);
                     }
                 } catch (Exception $telegramError) {
-                    Log::error('[machineWash] Telegram 告警发送失败', [
-                        'error' => $telegramError->getMessage(),
-                    ]);
+                    MachineLogger::log(
+                        $machine->toArray(),
+                        MachineLogger::SOURCE_SYSTEM,
+                        MachineLogger::STATUS_ERROR,
+                        MachineLogger::DIR_EVENT,
+                        MachineLogger::ACTION_WASH,
+                        'Telegram 告警发送失败',
+                        ['error' => $telegramError->getMessage()]
+                    );
                 }
 
                 // ⚠️ 不抛出异常，返回成功（因为 DB + Redis 已一致，硬件已清零）

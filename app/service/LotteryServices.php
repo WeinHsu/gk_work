@@ -12,6 +12,7 @@ use app\model\PlayerDeliveryRecord;
 use app\model\PlayerGameRecord;
 use app\model\PlayerLotteryRecord;
 use app\model\PlayerPlatformCash;
+use app\support\MachineLogger;
 use Exception;
 use support\Cache;
 use support\Db;
@@ -1418,6 +1419,19 @@ LUA;
     public function fixedPotCheckLottery($condition, bool $hasLottery = false, bool $hasSend = true)
     {
         if ($this->machine->machineCategory->lottery_assign_status == 0) {
+            MachineLogger::log(
+                $this->machine->toArray(),
+                MachineLogger::SOURCE_SYSTEM,
+                MachineLogger::STATUS_NORMAL,
+                MachineLogger::DIR_EVENT,
+                'lottery_fixed',
+                '机台分类彩金派发未启用，跳过',
+                [
+                    'player_id'   => $this->player->id ?? 0,
+                    'category_id' => $this->machine->machineCategory->id ?? null,
+                    'condition'   => $condition,
+                ]
+            );
             return null;
         }
         $lotteryList = [];
@@ -1453,7 +1467,6 @@ LUA;
                 'next_lottery' => [],
                 'created_at' => date('Y-m-d H:i:s')
             ];
-            $lotteryIndex = 0;
             $isLottery = false;
             /** @var Lottery $lottery */
             foreach ($lotteryList as $key => $lottery) {
@@ -1501,7 +1514,6 @@ LUA;
                         $fixedAllowLottery['lottery_pool_amount'] = $lottery->amount;
                         $fixedAllowLottery['lottery_multiple'] = $lotteryMultiple;
                         $fixedAllowLottery['is_doubled'] = $isDoubled ? 1 : 0;
-                        $lotteryIndex = $key;
                     }
                     $isLottery = true;
                 }
@@ -1509,6 +1521,22 @@ LUA;
             $odds = $this->machine->odds_x . ':' . $this->machine->odds_y;
             if ($this->machine->type == GameType::TYPE_STEEL_BALL) {
                 $odds = $this->machine->machineCategory->name;
+            }
+            if (!$isLottery) {
+                MachineLogger::log(
+                    $this->machine->toArray(),
+                    MachineLogger::SOURCE_SYSTEM,
+                    MachineLogger::STATUS_NORMAL,
+                    MachineLogger::DIR_EVENT,
+                    'lottery_fixed',
+                    '条件未达到，无固定彩金触发',
+                    [
+                        'player_id'     => $this->player->id ?? 0,
+                        'condition'     => $condition,
+                        'lottery_count' => count($lotteryList),
+                        'conditions'    => array_map(fn($l) => ['id' => $l->id, 'name' => $l->name, 'condition' => $l->condition], $lotteryList),
+                    ]
+                );
             }
             if ($hasLottery && $isLottery) {
                 // ✅ 获取语言（默认繁体中文）
@@ -1575,6 +1603,24 @@ LUA;
                     'lottery_hint' => $lotteryHint,  // ← 多语言提示文案
                 ];
             }
+            if ($isLottery && isset($fixedAllowLottery['amount']) && $fixedAllowLottery['amount'] <= 0) {
+                MachineLogger::log(
+                    $this->machine->toArray(),
+                    MachineLogger::SOURCE_SYSTEM,
+                    MachineLogger::STATUS_WARNING,
+                    MachineLogger::DIR_EVENT,
+                    'lottery_fixed',
+                    '彩金条件满足但派彩金额为0，彩池可能已耗尽',
+                    [
+                        'player_id'    => $this->player->id ?? 0,
+                        'condition'    => $condition,
+                        'lottery_id'   => $fixedAllowLottery['lottery_id'] ?? 'not_set',
+                        'lottery_name' => $fixedAllowLottery['lottery_name'] ?? 'not_set',
+                        'pool_amount'  => $fixedAllowLottery['lottery_pool_amount'] ?? 'not_set',
+                        'rate'         => $fixedAllowLottery['lottery_rate'] ?? 'not_set',
+                    ]
+                );
+            }
             if (isset($fixedAllowLottery['amount']) && $fixedAllowLottery['amount'] > 0) {
                 // 增加业务锁（参考随机彩金逻辑）
                 $actionLockerKey = 'machine_lottery_pool_fixed_locker_' . $fixedAllowLottery['lottery_id'];
@@ -1588,12 +1634,19 @@ LUA;
                     usleep(200000); // 200ms，等待 sync worker 释放锁
                 }
                 if (!$acquired) {
-                    \support\Log::warning('[fixedPotCheckLottery] 业务锁获取超时，彩金检查跳过', [
-                        'lottery_id' => $fixedAllowLottery['lottery_id'],
-                        'player_id'  => $this->player->id,
-                        'machine_id' => $this->machine->id,
-                        'condition'  => $condition,
-                    ]);
+                    MachineLogger::log(
+                        $this->machine->toArray(),
+                        MachineLogger::SOURCE_SYSTEM,
+                        MachineLogger::STATUS_WARNING,
+                        MachineLogger::DIR_EVENT,
+                        'lottery_fixed',
+                        '业务锁获取超时，彩金检查跳过',
+                        [
+                            'player_id'  => $this->player->id ?? 0,
+                            'lottery_id' => $fixedAllowLottery['lottery_id'],
+                            'condition'  => $condition,
+                        ]
+                    );
                     return null;
                 }
                 DB::beginTransaction();
@@ -1603,6 +1656,18 @@ LUA;
                     $lotteryModel = Lottery::query()->where('id', $fixedAllowLottery['lottery_id'])->lockForUpdate()->first();
                     if (!$lotteryModel) {
                         DB::rollback();
+                        MachineLogger::log(
+                            $this->machine->toArray(),
+                            MachineLogger::SOURCE_SYSTEM,
+                            MachineLogger::STATUS_WARNING,
+                            MachineLogger::DIR_EVENT,
+                            'lottery_fixed',
+                            '彩金记录不存在（lockForUpdate后），跳过',
+                            [
+                                'player_id'  => $this->player->id ?? 0,
+                                'lottery_id' => $fixedAllowLottery['lottery_id'],
+                            ]
+                        );
                         return null;
                     }
 
@@ -1639,6 +1704,18 @@ LUA;
                     $machineWallet = $this->player->machine_wallet()->first();
                     if (!$machineWallet) {
                         DB::rollback();
+                        MachineLogger::log(
+                            $this->machine->toArray(),
+                            MachineLogger::SOURCE_SYSTEM,
+                            MachineLogger::STATUS_WARNING,
+                            MachineLogger::DIR_EVENT,
+                            'lottery_fixed',
+                            '玩家机台钱包不存在（PlayerPlatformCash platform_id=1），跳过',
+                            [
+                                'player_id'  => $this->player->id ?? 0,
+                                'lottery_id' => $fixedAllowLottery['lottery_id'],
+                            ]
+                        );
                         return null;
                     }
 
