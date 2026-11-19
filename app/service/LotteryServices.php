@@ -1534,7 +1534,9 @@ LUA;
                         'player_id'     => $this->player->id ?? 0,
                         'condition'     => $condition,
                         'lottery_count' => count($lotteryList),
-                        'conditions'    => array_map(fn($l) => ['id' => $l->id, 'name' => $l->name, 'condition' => $l->condition], $lotteryList),
+                        // $lotteryList 是 Eloquent Collection（setSlotLotteryList/setJackLotteryList 的 get() 结果），
+                        // array_map 要求 array，必须先转数组，否则 TypeError 导致洗分接口整体报错
+                        'conditions'    => array_map(fn($l) => ['id' => $l->id, 'name' => $l->name, 'condition' => $l->condition], collect($lotteryList)->all()),
                     ]
                 );
             }
