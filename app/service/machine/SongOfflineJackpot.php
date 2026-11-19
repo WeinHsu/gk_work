@@ -258,6 +258,7 @@ class SongOfflineJackpot extends MachineServices implements BaseMachine
                 $this->lottery_record_id = 0;
             }
 
+            $oldValue = Cache::get($key);
             try {
                 $saveResult = Cache::set($this->cacheDataKey . '_' . $name, $value);
                 if (!$saveResult) {
@@ -392,7 +393,8 @@ class SongOfflineJackpot extends MachineServices implements BaseMachine
                 }
 
                 $currentGamingUserId = $machineCacheInfo[$this->cacheDataKey . '_gaming_user_id'] ?? 0;
-                if (in_array($name, $this->machineInfo) && !empty($currentGamingUserId)) {
+                if (in_array($name, $this->machineInfo) && !empty($currentGamingUserId)
+                    && (string)$oldValue !== (string)$value) {
                     $this->sendMachineNowInfoMessage($currentGamingUserId, $this->machine->id, $name, $info);
                 }
             }

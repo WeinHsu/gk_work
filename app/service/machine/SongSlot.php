@@ -198,6 +198,7 @@ class SongSlot extends MachineServices implements BaseMachine
                 $this->lottery_record_id = 0;
             }
 
+            $oldValue = Cache::get($key);
             try {
                 // 保存到缓存，失败时立即重试1次
                 $saveResult = Cache::set($this->cacheDataKey . '_' . $name, $value);
@@ -315,7 +316,8 @@ class SongSlot extends MachineServices implements BaseMachine
 
                 // ✅ 从 Redis 读取 gaming_user_id
                 $currentGamingUserId = $machineCacheInfo[$this->cacheDataKey . '_gaming_user_id'] ?? 0;
-                if (in_array($name, $this->machineInfo) && !empty($currentGamingUserId)) {
+                if (in_array($name, $this->machineInfo) && !empty($currentGamingUserId)
+                    && (string)$oldValue !== (string)$value) {
                     $this->sendMachineNowInfoMessage($currentGamingUserId, $this->machine->id, $name, $info);
                 }
             }

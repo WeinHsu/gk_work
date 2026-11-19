@@ -213,6 +213,7 @@ class Jackpot extends MachineServices implements BaseMachine
                 $this->lottery_record_id = 0;
             }
 
+            $oldValue = Cache::get($key);
             try {
                 // 保存到缓存，失败时立即重试1次
                 $saveResult = Cache::set($this->cacheDataKey . '_' . $name, $value);
@@ -340,7 +341,8 @@ class Jackpot extends MachineServices implements BaseMachine
                         }
                         break;
                 }
-                if (in_array($name, $this->machineInfo) && !empty($this->machine->gaming_user_id)) {
+                if (in_array($name, $this->machineInfo) && !empty($this->machine->gaming_user_id)
+                    && (string)$oldValue !== (string)$value) {
                     $this->sendMachineNowInfoMessage($this->machine->gaming_user_id, $this->machine->id, $name, $info);
                 }
             }
