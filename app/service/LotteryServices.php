@@ -1805,11 +1805,8 @@ LUA;
 
                     // 派彩成功后补充到保底金额（参考随机彩金逻辑）
                     if ($lotteryModel->auto_refill_status == 1 && $lotteryModel->auto_refill_amount > 0) {
-                        $beforeRefillAmount = $lotteryModel->amount;
-
                         // 只有当彩池低于保底金额时才补充
                         if ($lotteryModel->amount < $lotteryModel->auto_refill_amount) {
-                            $refillAmount = bcsub($lotteryModel->auto_refill_amount, $lotteryModel->amount, 4);
                             $lotteryModel->amount = $lotteryModel->auto_refill_amount;
                         }
                     }
@@ -1892,7 +1889,6 @@ LUA;
                     // 实时推送已禁用，改用定时任务推送（LotteryPoolSocket）
                     // self::pushLotteryPoolData();
 
-                    if ($hasSend) {
                         try {
                             sendSocketMessage('player-' . $this->player->id, $fixedAllowLottery);
                             MachineLogger::log(
@@ -1927,21 +1923,6 @@ LUA;
                                 ]
                             );
                         }
-                    } else {
-                        MachineLogger::log(
-                            $this->machine->toArray(),
-                            MachineLogger::SOURCE_SYSTEM,
-                            MachineLogger::STATUS_NORMAL,
-                            MachineLogger::DIR_EVENT,
-                            'lottery_fixed',
-                            'WS 彩金消息跳过（hasSend=false，非离场路径）',
-                            [
-                                'player_id'  => $this->player->id,
-                                'lottery_id' => $fixedAllowLottery['lottery_id'],
-                                'amount'     => $fixedAllowLottery['amount'],
-                            ]
-                        );
-                    }
 
                     // 发送中奖通知消息
                     sendSocketMessage('player-' . $this->player->id, [
