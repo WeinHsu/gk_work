@@ -303,16 +303,7 @@ class HighScoreBroadcastService
      */
     private static function buildMessage(Player $player, Channel $channel, PlayGameRecord $record): array
     {
-        // 获取玩家名称并脱敏（统一使用 name 字段）
-        $rawName = $player->name ?? 'Unknown';
-        $nameLength = mb_strlen($rawName);
-        if ($nameLength <= 2) {
-            // 1-2个字：显示第1个字 + *，如 "张*"
-            $deviceName = mb_substr($rawName, 0, 1) . '*';
-        } else {
-            // 3个字及以上：显示第1个字 + ***，如 "王***"
-            $deviceName = mb_substr($rawName, 0, 1) . '***';
-        }
+        $deviceName = $player->name ?? 'Unknown';
 
         // 获取店家名称
         $storeName = '';
