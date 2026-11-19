@@ -1893,7 +1893,54 @@ LUA;
                     // self::pushLotteryPoolData();
 
                     if ($hasSend) {
-                        sendSocketMessage('player-' . $this->player->id, $fixedAllowLottery);
+                        try {
+                            sendSocketMessage('player-' . $this->player->id, $fixedAllowLottery);
+                            MachineLogger::log(
+                                $this->machine->toArray(),
+                                MachineLogger::SOURCE_SYSTEM,
+                                MachineLogger::STATUS_NORMAL,
+                                MachineLogger::DIR_EVENT,
+                                'lottery_fixed',
+                                'WS 彩金派发消息已发送',
+                                [
+                                    'player_id'    => $this->player->id,
+                                    'channel'      => 'player-' . $this->player->id,
+                                    'lottery_id'   => $fixedAllowLottery['lottery_id'],
+                                    'lottery_name' => $fixedAllowLottery['lottery_name'],
+                                    'amount'       => $fixedAllowLottery['amount'],
+                                ]
+                            );
+                        } catch (\Exception $wsPushE) {
+                            MachineLogger::log(
+                                $this->machine->toArray(),
+                                MachineLogger::SOURCE_SYSTEM,
+                                MachineLogger::STATUS_ERROR,
+                                MachineLogger::DIR_EVENT,
+                                'lottery_fixed',
+                                'WS 彩金派发消息发送失败',
+                                [
+                                    'player_id'  => $this->player->id,
+                                    'channel'    => 'player-' . $this->player->id,
+                                    'lottery_id' => $fixedAllowLottery['lottery_id'],
+                                    'amount'     => $fixedAllowLottery['amount'],
+                                    'error'      => $wsPushE->getMessage(),
+                                ]
+                            );
+                        }
+                    } else {
+                        MachineLogger::log(
+                            $this->machine->toArray(),
+                            MachineLogger::SOURCE_SYSTEM,
+                            MachineLogger::STATUS_NORMAL,
+                            MachineLogger::DIR_EVENT,
+                            'lottery_fixed',
+                            'WS 彩金消息跳过（hasSend=false，非离场路径）',
+                            [
+                                'player_id'  => $this->player->id,
+                                'lottery_id' => $fixedAllowLottery['lottery_id'],
+                                'amount'     => $fixedAllowLottery['amount'],
+                            ]
+                        );
                     }
 
                     // 发送中奖通知消息
